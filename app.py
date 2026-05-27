@@ -1,8 +1,9 @@
 import streamlit as st
-import anthropic
 import json
 import random
 import string
+import requests
+from supabase import create_client
 
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -536,20 +537,49 @@ Generate a behavioral capital map in JSON format with this exact structure:
 Be specific, honest, and practical. No generic advice. Address their actual barriers directly. Respond ONLY with valid JSON, no markdown, no preamble."""
 
 
-def call_claude(prompt: str) -> dict:
-    client = anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
-    message = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=1100,
-        messages=[{"role": "user", "content": prompt}],
+def call_groq(prompt: str) -> dict:
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {st.secrets['GROQ_API_KEY']}",
+    }
+    payload = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 1100,
+        "temperature": 0.7,
+    }
+    response = requests.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        headers=headers,
+        json=payload,
+        timeout=30,
     )
-    raw = message.content[0].text.strip()
+    response.raise_for_status()
+    raw = response.json()["choices"][0]["message"]["content"].strip()
     # Strip accidental markdown fences
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
             raw = raw[4:]
     return json.loads(raw.strip())
+
+
+def log_to_supabase(skills: list, barriers: list, result: dict):
+    try:
+        client = create_client(
+            st.secrets["SUPABASE_URL"],
+            st.secrets["SUPABASE_KEY"],
+        )
+        client.table("sessions").insert({
+            "skills": skills,
+            "barriers": barriers,
+            "capital_statement": result.get("capital_statement", ""),
+            "paths": result.get("paths", []),
+            "torah_anchor": result.get("torah_anchor", ""),
+            "barrier_reframe": result.get("barrier_reframe", ""),
+        }).execute()
+    except Exception:
+        pass  # Never crash the app if logging fails
 
 
 def render_result(result: dict):
@@ -737,10 +767,11 @@ if can_generate:
 
         with st.spinner("// EQUAI IS MAPPING YOUR BEHAVIORAL CAPITAL..."):
             try:
-                result = call_claude(build_prompt(skills_clean, barriers_clean))
+                result = call_groq(build_prompt(skills_clean, barriers_clean))
+                log_to_supabase(skills_clean, barriers_clean, result)
                 st.session_state["last_result"] = result
             except Exception as e:
-                st.error(f"API error: {e}. Check your ANTHROPIC_API_KEY in secrets.")
+                st.error(f"API error: {e}. Check your GROQ_API_KEY in secrets.")
                 st.session_state["last_result"] = None
 else:
     st.button("GENERATE MY CAPITAL MAP", disabled=True, use_container_width=True)
